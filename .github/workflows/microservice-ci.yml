@@ -77,14 +77,14 @@ jobs:
   security-scan:
     name: "Security Scan"
     needs: build-and-push
-    # Aquí está la magia del reusable workflow
-    # Un equipo de producto escribe estas 8 líneas y tiene SAST+SCA+DAST
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     uses: ivanmunozm/mcp-devsecops-lab/.github/workflows/devsecops-reusable.yml@master
     with:
       target_repo: ${{ github.repository }}
       target_branch: ${{ github.ref_name }}
-      # Pasamos el tag exacto de la imagen recién buildeada
-      # Trivy va a escanear esta imagen específica, no un tag genérico
       image_tag: ghcr.io/${{ github.repository_owner }}/ms-devsecops:sha-${{ github.sha }}
       scan_level: quick
     secrets: inherit
