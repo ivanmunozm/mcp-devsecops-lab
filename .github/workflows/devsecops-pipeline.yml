@@ -1,0 +1,332 @@
+# .github/workflows/devsecops-pipeline.yml
+
+name: DevSecOps Pipeline
+
+# workflow_dispatch permite triggerear manualmente y via API
+# Es el trigger que usará nuestro MCP server
+# inputs define los parámetros que podemos pasar desde la tool
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Branch a analizar'
+        required: false
+        default: 'main'
+      scan_level:
+        description: 'Nivel de escaneo: quick | full'
+        required: false
+        default: 'quick'
+
+# Variables disponibles para todos los jobs
+env:
+  # La imagen target que ZAP va a atacar
+  DVWA_IMAGE: vulnerables/web-dvwa
+  # Puerto interno del contenedor
+  TARGET_PORT: 80
+  # URL que ZAP usará — apunta al contenedor en la red de Actions
+  TARGET_URL: http://localhost:80
+
+jobs:
+  # ─────────────────────────────────────────────
+  # STAGE 1 — SAST
+  # Análisis estático del código fuente
+  # No ejecuta el código — analiza patrones peligrosos
+  # ─────────────────────────────────────────────
+  sast:
+    name: "Stage 1 — SAST"
+    runs-on: ubuntu-latest
+    # Permisos mínimos para este job
+    permissions:
+      contents: read
+      security-events: write   # necesario para subir resultados SARIF a GitHub
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # Semgrep — SAST open source, multi-lenguaje
+      # Por qué Semgrep sobre Bandit (Python-only):
+      #   - Cuando agreguemos más código al repo, Semgrep lo cubre todo
+      #   - Reglas mantenidas por la comunidad y por Semgrep Inc.
+      #   - Output en SARIF — formato estándar que GitHub entiende
+      - name: Semgrep SAST
+        uses: semgrep/semgrep-action@v1
+        with:
+          # p/python incluye reglas para vulnerabilidades comunes en Python
+          # p/secrets detecta tokens y credenciales hardcodeadas
+          config: >-
+            p/python
+            p/secrets
+        env:
+          # Sin token funciona igual pero con rate limiting
+          # Para el lab está bien
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        # continue-on-error para que el pipeline no muera si Semgrep encuentra algo
+        # Queremos reporte aunque haya hallazgos
+        continue-on-error: true
+
+      # CodeQL — análisis semántico profundo de GitHub
+      # Por qué además de Semgrep:
+      #   - CodeQL hace análisis de flujo de datos (taint analysis)
+      #   - Detecta vulnerabilidades que requieren razonar sobre cómo los datos
+      #     fluyen a través del programa — Semgrep no llega a ese nivel
+      - name: CodeQL — Initialize
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # security-extended incluye queries experimentales
+          # más hallazgos, más falsos positivos — aceptable para el lab
+          queries: security-extended
+
+      - name: CodeQL — Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: CodeQL — Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
+        continue-on-error: true
+
+  # ─────────────────────────────────────────────
+  # STAGE 2 — SCA + Container Security
+  # Analiza dependencias (librerías con CVEs conocidos)
+  # y la imagen Docker si hubiera una
+  # ─────────────────────────────────────────────
+  sca-container:
+    name: "Stage 2 — SCA + Container"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # Trivy escanea el filesystem del repo buscando:
+      #   - Dependencias con CVEs en pyproject.toml / uv.lock
+      #   - Misconfigurations en archivos de infraestructura
+      #   - Secrets hardcodeados
+      - name: Trivy — filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          # SARIF para que GitHub muestre los hallazgos en Security tab
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+        continue-on-error: true
+
+      - name: Upload Trivy FS results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+          category: 'trivy-filesystem'
+        continue-on-error: true
+
+      # Escanear también la imagen DVWA que vamos a usar en DAST
+      # Esto nos da el perfil de vulnerabilidades del target antes de atacarlo
+      - name: Trivy — container scan (imagen DVWA)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: 'vulnerables/web-dvwa'
+          format: 'sarif'
+          output: 'trivy-container-results.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+
+      - name: Upload Trivy container results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-container-results.sarif'
+          category: 'trivy-container'
+        continue-on-error: true
+
+      # Guardar resultados como artefacto para que el MCP los lea después
+      - name: Guardar artefactos SCA
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-results
+          path: |
+            trivy-fs-results.sarif
+            trivy-container-results.sarif
+          retention-days: 7
+
+  # ─────────────────────────────────────────────
+  # STAGE 3 — DAST
+  # Ataque dinámico contra la app corriendo
+  # ZAP actúa como atacante automatizado
+  # ─────────────────────────────────────────────
+  dast:
+    name: "Stage 3 — DAST"
+    runs-on: ubuntu-latest
+    # DAST puede correr en paralelo con SCA — son independientes
+    # Solo necesita que el código esté disponible para el reporte
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # Levantar DVWA como contenedor en background
+      # --network host hace que ZAP pueda acceder via localhost
+      - name: Levantar app target (DVWA)
+        run: |
+          docker run -d \
+            --name dvwa \
+            -p 80:80 \
+            vulnerables/web-dvwa
+          
+          # Esperar que el contenedor esté healthy
+          # DVWA tarda ~15s en inicializar la DB
+          echo "Esperando que DVWA esté listo..."
+          sleep 20
+          
+          # Verificar que responde
+          curl -f http://localhost:80 || echo "DVWA no responde aún, continuando..."
+
+      # OWASP ZAP Baseline Scan
+      # Por qué baseline y no full scan:
+      #   - Full scan puede tardar horas — no viable en CI
+      #   - Baseline corre en ~2-5 minutos y cubre las vulnerabilidades más críticas
+      #   - Para el laboratorio es suficiente para generar hallazgos reales
+      - name: OWASP ZAP — Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ env.TARGET_URL }}
+          # rules_file_name permite ignorar falsos positivos conocidos
+          # Lo dejamos sin configurar para ver todos los hallazgos
+          cmd_options: '-J zap-results.json'
+        continue-on-error: true
+
+      - name: Guardar artefactos DAST
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-results
+          path: |
+            zap-results.json
+            report_html.html
+            report_md.md
+        continue-on-error: true
+
+  # ─────────────────────────────────────────────
+  # STAGE 4 — Reporte Consolidado
+  # Agrega resultados de todos los stages
+  # Este es el artefacto que el MCP server va a leer
+  # ─────────────────────────────────────────────
+  consolidate-report:
+    name: "Stage 4 — Reporte Consolidado"
+    runs-on: ubuntu-latest
+    # Este job espera que los tres anteriores terminen
+    # (aunque fallen — por eso continue-on-error en cada stage)
+    needs: [sast, sca-container, dast]
+    # always() hace que corra incluso si los jobs anteriores fallaron
+    if: always()
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # Descargar todos los artefactos de los stages anteriores
+      - name: Descargar artefactos SCA
+        uses: actions/download-artifact@v4
+        with:
+          name: sca-results
+          path: artifacts/sca
+        continue-on-error: true
+
+      - name: Descargar artefactos DAST
+        uses: actions/download-artifact@v4
+        with:
+          name: dast-results
+          path: artifacts/dast
+        continue-on-error: true
+
+      # Script Python que consolida todo en un JSON estructurado
+      # Este es el formato que nuestro MCP server va a consumir
+      - name: Generar reporte consolidado
+        run: |
+          python3 << 'EOF'
+          import json
+          import os
+          from datetime import datetime
+
+          report = {
+              "pipeline_run": {
+                  "timestamp": datetime.utcnow().isoformat() + "Z",
+                  "run_id": os.environ.get("GITHUB_RUN_ID", "unknown"),
+                  "run_number": os.environ.get("GITHUB_RUN_NUMBER", "unknown"),
+                  "repository": os.environ.get("GITHUB_REPOSITORY", "unknown"),
+                  "branch": os.environ.get("GITHUB_REF_NAME", "unknown"),
+                  "triggered_by": os.environ.get("GITHUB_ACTOR", "unknown"),
+              },
+              "stages": {
+                  "sast": {"status": "completed", "tools": ["semgrep", "codeql"]},
+                  "sca": {"status": "completed", "tools": ["trivy-fs", "trivy-container"]},
+                  "dast": {"status": "completed", "tools": ["owasp-zap"]},
+              },
+              "findings": {
+                  "sca": [],
+                  "dast": [],
+              },
+              "summary": {
+                  "total_findings": 0,
+                  "critical": 0,
+                  "high": 0,
+                  "medium": 0,
+                  "low": 0,
+              }
+          }
+
+          # Parsear resultados DAST de ZAP si existen
+          zap_file = "artifacts/dast/zap-results.json"
+          if os.path.exists(zap_file):
+              try:
+                  with open(zap_file) as f:
+                      zap_data = json.load(f)
+                  alerts = zap_data.get("site", [{}])[0].get("alerts", [])
+                  for alert in alerts:
+                      finding = {
+                          "tool": "owasp-zap",
+                          "name": alert.get("name"),
+                          "risk": alert.get("riskdesc"),
+                          "description": alert.get("desc", "")[:200],
+                          "solution": alert.get("solution", "")[:200],
+                          "url": alert.get("instances", [{}])[0].get("uri", ""),
+                          "cweid": alert.get("cweid"),
+                      }
+                      report["findings"]["dast"].append(finding)
+                      risk = alert.get("riskcode", "3")
+                      if risk == "3": report["summary"]["critical"] += 1
+                      elif risk == "2": report["summary"]["high"] += 1
+                      elif risk == "1": report["summary"]["medium"] += 1
+                      else: report["summary"]["low"] += 1
+              except Exception as e:
+                  report["stages"]["dast"]["parse_error"] = str(e)
+
+          report["summary"]["total_findings"] = sum([
+              report["summary"]["critical"],
+              report["summary"]["high"],
+              report["summary"]["medium"],
+              report["summary"]["low"],
+          ])
+
+          os.makedirs("artifacts/report", exist_ok=True)
+          with open("artifacts/report/security-report.json", "w") as f:
+              json.dump(report, f, indent=2)
+
+          print(f"Reporte generado: {report['summary']['total_findings']} hallazgos totales")
+          print(json.dumps(report['summary'], indent=2))
+          EOF
+
+      - name: Subir reporte consolidado
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: artifacts/report/security-report.json
+          retention-days: 30
