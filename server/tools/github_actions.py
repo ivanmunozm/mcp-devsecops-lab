@@ -9,7 +9,7 @@ import zipfile
 import io
 from typing import Optional
 import httpx
-from mcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 from server.config import config
 
 
@@ -34,7 +34,7 @@ def register_github_actions_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def trigger_pipeline(
-        branch: str = "main",
+        branch: str = "master",
         scan_level: str = "quick",
     ) -> dict:
         """
@@ -43,7 +43,7 @@ def register_github_actions_tools(mcp: FastMCP) -> None:
         Retorna el run_id para hacer seguimiento con get_pipeline_status.
 
         Args:
-            branch: Branch a analizar. Default: main
+            branch: Branch a analizar. Default: master
             scan_level: Nivel de escaneo — 'quick' (2-5 min) o 'full' (10-15 min)
         """
         # Validar inputs antes de llamar la API

@@ -1,7 +1,7 @@
 # server/tools/health.py
 """Tools de health check y discovery del servidor."""
 
-from mcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 from datetime import datetime
 import platform
 import sys

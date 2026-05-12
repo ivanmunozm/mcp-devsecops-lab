@@ -4,7 +4,7 @@ MCP Server — DevSecOps Lab
 Punto de entrada principal. Registra todos los módulos de tools.
 """
 
-from mcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 from server.config import config
 from server.tools.health import register_health_tools
 from server.tools.github_actions import register_github_actions_tools

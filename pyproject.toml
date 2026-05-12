@@ -16,3 +16,7 @@ package = true
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# Esto le dice a hatchling: "el código está en el directorio server/"
+[tool.hatch.build.targets.wheel]
+packages = ["server"]
