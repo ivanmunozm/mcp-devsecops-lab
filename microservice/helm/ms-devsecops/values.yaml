@@ -1,0 +1,56 @@
+# Valores por defecto — se sobreescriben por entorno o en CI
+
+replicaCount: 1
+
+image:
+  # repository se sobreescribe en CI con la imagen real de GHCR
+  repository: ghcr.io/ivanmunozm/ms-devsecops
+  # tag se sobreescribe en CI con el SHA del commit
+  tag: "latest"
+  # IfNotPresent: no re-descarga si ya existe localmente
+  # Always: siempre descarga — útil en dev con latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Resources — limits y requests son obligatorios en contextos PCI-DSS
+# Sin limits, un pod puede consumir todos los recursos del nodo
+resources:
+  limits:
+    cpu: "500m"      # 0.5 CPU
+    memory: "256Mi"
+  requests:
+    cpu: "100m"      # 0.1 CPU
+    memory: "128Mi"
+
+# HPA — Horizontal Pod Autoscaler
+autoscaling:
+  enabled: false     # deshabilitado en dev, habilitado en prod
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+# Variables de entorno que se inyectan al contenedor
+env:
+  ENVIRONMENT: "development"
+  PORT: "8080"
+
+# Probes de Kubernetes
+# Liveness: si falla, Kubernetes reinicia el pod
+# Readiness: si falla, Kubernetes no envía tráfico al pod
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10

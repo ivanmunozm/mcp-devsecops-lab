@@ -1,0 +1,53 @@
+# microservice/helm/ms-devsecops/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # include.fullname es un helper definido en _helpers.tpl
+  name: {{ include "ms-devsecops.fullname" . }}
+  labels:
+    {{- include "ms-devsecops.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ms-devsecops.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ms-devsecops.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Forzar rolling update cuando cambia el configmap
+        checksum/config: {{ .Values | toJson | sha256sum }}
+    spec:
+      # securityContext a nivel de pod
+      # runAsNonRoot: fuerza que el contenedor corra como no-root
+      # Kubernetes rechaza el pod si intenta correr como root
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # securityContext a nivel de contenedor
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

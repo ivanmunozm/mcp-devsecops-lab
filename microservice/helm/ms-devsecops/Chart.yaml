@@ -1,0 +1,17 @@
+# microservice/helm/ms-devsecops/Chart.yaml
+apiVersion: v2
+name: ms-devsecops
+description: Microservicio de laboratorio DevSecOps
+type: application
+
+# version: versión del chart — cambia cuando cambia la configuración de Helm
+# Sigue SemVer: MAJOR.MINOR.PATCH
+version: 0.1.0
+
+# appVersion: versión de la aplicación que despliega el chart
+# Se sobreescribe en CI con el SHA del commit o tag de release
+appVersion: "0.1.0"
+
+maintainers:
+  - name: ivanmunozm
+    email: devops@lab.local

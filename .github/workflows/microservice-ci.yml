@@ -1,0 +1,137 @@
+name: Microservice CI
+
+on:
+  push:
+    # Solo triggerear cuando cambia el microservicio
+    paths:
+      - 'microservice/**'
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/ms-devsecops
+
+jobs:
+  # ── Build y push de la imagen a GHCR ─────────────────────────────────────
+  build-and-push:
+    name: "Build & Push imagen"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # packages: write es el permiso para push a GHCR
+      packages: write
+
+    # outputs para pasar el tag exacto al job de seguridad
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # docker/metadata-action genera tags automáticamente
+      # Para push a master: ghcr.io/ivanmunozm/ms-devsecops:master-sha-abc1234
+      # Para tags de release: ghcr.io/ivanmunozm/ms-devsecops:v1.0.0
+      - name: Generar metadata de imagen
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Login a GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          # GITHUB_TOKEN tiene permisos de packages:write automáticamente
+          # No necesitas crear secrets adicionales
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # buildx habilita BuildKit — builds más rápidos y multi-platform
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build y Push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./microservice
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Build args para los ARGs del Dockerfile
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          # Cache entre builds — acelera CI significativamente
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Invocar el reusable workflow de seguridad ─────────────────────────────
+  security-scan:
+    name: "Security Scan"
+    needs: build-and-push
+    # Aquí está la magia del reusable workflow
+    # Un equipo de producto escribe estas 8 líneas y tiene SAST+SCA+DAST
+    uses: ivanmunozm/mcp-devsecops-lab/.github/workflows/devsecops-reusable.yml@master
+    with:
+      target_repo: ${{ github.repository }}
+      target_branch: ${{ github.ref_name }}
+      # Pasamos el tag exacto de la imagen recién buildeada
+      # Trivy va a escanear esta imagen específica, no un tag genérico
+      image_tag: ghcr.io/${{ github.repository_owner }}/ms-devsecops:sha-${{ github.sha }}
+      scan_level: quick
+    secrets: inherit
+
+  # ── GitOps: actualizar values.yaml si el security gate pasó ──────────────
+  update-deployment:
+    name: "GitOps — Update Deployment"
+    needs: [build-and-push, security-scan]
+    runs-on: ubuntu-latest
+    # Solo actualizar si el security gate pasó
+    if: needs.security-scan.outputs.security_passed == 'true'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Actualizar image tag en values.yaml
+        run: |
+          # Extraer el SHA corto para el tag
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          IMAGE_TAG="sha-${SHORT_SHA}"
+
+          echo "Actualizando image.tag a: $IMAGE_TAG"
+
+          # Actualizar el values.yaml con el nuevo tag
+          sed -i "s|tag: .*|tag: \"${IMAGE_TAG}\"|" \
+            microservice/helm/ms-devsecops/values.yaml
+
+          # Verificar el cambio
+          grep "tag:" microservice/helm/ms-devsecops/values.yaml
+
+      - name: Commit y push del nuevo tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          git add microservice/helm/ms-devsecops/values.yaml
+          git diff --staged --quiet || git commit -m \
+            "chore(gitops): deploy ms-devsecops sha-${SHORT_SHA}
+
+            Security gate: PASSED
+            Image: ghcr.io/${{ github.repository_owner }}/ms-devsecops:sha-${SHORT_SHA}
+            Triggered by: ${{ github.actor }}
+            Run: ${{ github.run_id }}"
+
+          git push
