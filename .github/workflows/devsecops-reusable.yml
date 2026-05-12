@@ -1,0 +1,347 @@
+# .github/workflows/devsecops-reusable.yml
+#
+# Reusable DevSecOps Pipeline
+# Puede ser invocado por:
+#   1. workflow_dispatch — manualmente o via API (MCP server)
+#   2. workflow_call     — desde cualquier repo de la organización
+#
+name: DevSecOps Pipeline (Reusable)
+
+on:
+  # ── Trigger 1: invocación manual o via API ──────────────────────────────
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Branch a analizar'
+        required: false
+        default: 'master'
+      scan_level:
+        description: 'Nivel: quick | full'
+        required: false
+        default: 'quick'
+      caller_repo:
+        description: 'Repo que invoca (para el reporte)'
+        required: false
+        default: ''
+
+  # ── Trigger 2: invocación desde otro workflow ───────────────────────────
+  # workflow_call expone inputs y outputs — es la "API" del workflow
+  workflow_call:
+    # inputs: parámetros que el caller puede pasar
+    inputs:
+      target_repo:
+        description: 'Repo del microservicio siendo escaneado'
+        required: true
+        type: string
+      target_branch:
+        description: 'Branch a analizar'
+        required: false
+        type: string
+        default: 'master'
+      image_tag:
+        description: 'Tag de la imagen Docker a escanear con Trivy'
+        required: false
+        type: string
+        default: 'latest'
+      scan_level:
+        description: 'quick | full'
+        required: false
+        type: string
+        default: 'quick'
+
+    # secrets: secretos que el caller puede pasar
+    # inherit hace que el caller comparta sus secrets automáticamente
+    secrets:
+      CALLER_TOKEN:
+        description: 'Token con acceso al repo caller'
+        required: false
+
+    # outputs: lo que este workflow devuelve al caller
+    # Permite que el caller tome decisiones basadas en los resultados
+    outputs:
+      security_passed:
+        description: 'true si pasó el security gate, false si falló'
+        value: ${{ jobs.consolidate-report.outputs.security_passed }}
+      report_artifact_id:
+        description: 'ID del artefacto con el reporte JSON'
+        value: ${{ jobs.consolidate-report.outputs.report_artifact_id }}
+      total_findings:
+        description: 'Total de hallazgos encontrados'
+        value: ${{ jobs.consolidate-report.outputs.total_findings }}
+      critical_findings:
+        description: 'Hallazgos críticos'
+        value: ${{ jobs.consolidate-report.outputs.critical_findings }}
+
+# Variables disponibles para todos los jobs
+env:
+  # Si viene de workflow_call usa target_repo, si es dispatch usa el repo actual
+  SCAN_TARGET: ${{ inputs.target_repo || github.repository }}
+  SCAN_LEVEL:  ${{ inputs.scan_level || 'quick' }}
+  TARGET_URL:  http://localhost:80
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # STAGE 1 — SAST
+  # ──────────────────────────────────────────────────────────────────────
+  sast:
+    name: "Stage 1 — SAST"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Semgrep SAST
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/python
+            p/secrets
+        continue-on-error: true
+
+      - name: CodeQL — Initialize
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-extended
+        continue-on-error: true
+
+      - name: CodeQL — Autobuild
+        uses: github/codeql-action/autobuild@v3
+        continue-on-error: true
+
+      - name: CodeQL — Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
+        continue-on-error: true
+
+  # ──────────────────────────────────────────────────────────────────────
+  # STAGE 2 — SCA + Container
+  # ──────────────────────────────────────────────────────────────────────
+  sca-container:
+    name: "Stage 2 — SCA + Container"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Trivy — filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+        continue-on-error: true
+
+      - name: Upload Trivy FS results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+          category: 'trivy-filesystem'
+        continue-on-error: true
+
+      - name: Trivy — container scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          # Si viene de workflow_call escanea la imagen del microservicio
+          # Si es dispatch escanea DVWA como en Fase 1
+          image-ref: ${{ inputs.image_tag != '' && inputs.image_tag || 'vulnerables/web-dvwa' }}
+          format: 'sarif'
+          output: 'trivy-container-results.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+
+      - name: Upload Trivy container results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-container-results.sarif'
+          category: 'trivy-container'
+        continue-on-error: true
+
+      - name: Guardar artefactos SCA
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-results
+          path: |
+            trivy-fs-results.sarif
+            trivy-container-results.sarif
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────────────
+  # STAGE 3 — DAST
+  # ──────────────────────────────────────────────────────────────────────
+  dast:
+    name: "Stage 3 — DAST"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Levantar app target (DVWA)
+        run: |
+          docker run -d --name dvwa -p 80:80 vulnerables/web-dvwa
+          echo "Esperando inicialización..."
+          sleep 20
+          curl -f http://localhost:80 || echo "DVWA aún inicializando..."
+
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ env.TARGET_URL }}
+          cmd_options: '-J zap-results.json'
+        continue-on-error: true
+
+      - name: Guardar artefactos DAST
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-results
+          path: |
+            zap-results.json
+            report_html.html
+            report_md.md
+        continue-on-error: true
+
+  # ──────────────────────────────────────────────────────────────────────
+  # STAGE 4 — Reporte Consolidado + Security Gate + Outputs
+  # ──────────────────────────────────────────────────────────────────────
+  consolidate-report:
+    name: "Stage 4 — Reporte + Security Gate"
+    runs-on: ubuntu-latest
+    needs: [sast, sca-container, dast]
+    if: always()
+    permissions:
+      contents: read
+      # Permiso para crear issues automáticos si falla el security gate
+      issues: write
+
+    # outputs del job — estos alimentan los outputs del workflow
+    outputs:
+      security_passed:    ${{ steps.gate.outputs.security_passed }}
+      report_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      total_findings:     ${{ steps.report.outputs.total_findings }}
+      critical_findings:  ${{ steps.report.outputs.critical_findings }}
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Descargar artefactos SCA
+        uses: actions/download-artifact@v4
+        with:
+          name: sca-results
+          path: artifacts/sca
+        continue-on-error: true
+
+      - name: Descargar artefactos DAST
+        uses: actions/download-artifact@v4
+        with:
+          name: dast-results
+          path: artifacts/dast
+        continue-on-error: true
+
+      - name: Generar reporte consolidado
+        id: report
+        run: |
+          python3 << 'EOF'
+          import json, os
+          from datetime import datetime
+
+          report = {
+              "pipeline_run": {
+                  "timestamp": datetime.utcnow().isoformat() + "Z",
+                  "run_id": os.environ.get("GITHUB_RUN_ID", "unknown"),
+                  "run_number": os.environ.get("GITHUB_RUN_NUMBER", "unknown"),
+                  "repository": os.environ.get("GITHUB_REPOSITORY", "unknown"),
+                  "scan_target": os.environ.get("SCAN_TARGET", "unknown"),
+                  "branch": os.environ.get("GITHUB_REF_NAME", "unknown"),
+                  "triggered_by": os.environ.get("GITHUB_ACTOR", "unknown"),
+                  "image_tag": "${{ inputs.image_tag || 'N/A' }}",
+              },
+              "stages": {
+                  "sast": {"status": "completed", "tools": ["semgrep", "codeql"]},
+                  "sca":  {"status": "completed", "tools": ["trivy-fs", "trivy-container"]},
+                  "dast": {"status": "completed", "tools": ["owasp-zap"]},
+              },
+              "findings": { "sca": [], "dast": [] },
+              "summary": { "total_findings": 0, "critical": 0, "high": 0, "medium": 0, "low": 0 }
+          }
+
+          # Parsear ZAP
+          zap_file = "artifacts/dast/zap-results.json"
+          if os.path.exists(zap_file):
+              try:
+                  with open(zap_file) as f:
+                      zap_data = json.load(f)
+                  alerts = zap_data.get("site", [{}])[0].get("alerts", [])
+                  for alert in alerts:
+                      risk = int(alert.get("riskcode", "3"))
+                      report["findings"]["dast"].append({
+                          "tool": "owasp-zap",
+                          "name": alert.get("name"),
+                          "risk": alert.get("riskdesc"),
+                          "description": alert.get("desc", "")[:200],
+                          "solution": alert.get("solution", "")[:200],
+                          "cweid": alert.get("cweid"),
+                      })
+                      if risk == 3: report["summary"]["critical"] += 1
+                      elif risk == 2: report["summary"]["high"] += 1
+                      elif risk == 1: report["summary"]["medium"] += 1
+                      else: report["summary"]["low"] += 1
+              except Exception as e:
+                  report["stages"]["dast"]["parse_error"] = str(e)
+
+          report["summary"]["total_findings"] = sum([
+              report["summary"]["critical"], report["summary"]["high"],
+              report["summary"]["medium"],   report["summary"]["low"],
+          ])
+
+          os.makedirs("artifacts/report", exist_ok=True)
+          with open("artifacts/report/security-report.json", "w") as f:
+              json.dump(report, f, indent=2)
+
+          # Escribir outputs del step para que el job los propague
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"total_findings={report['summary']['total_findings']}\n")
+              out.write(f"critical_findings={report['summary']['critical']}\n")
+
+          print(f"Hallazgos: {report['summary']}")
+          EOF
+
+      # El security gate decide si el pipeline "pasó" o "falló"
+      # Criterio: 0 hallazgos críticos = pasa
+      # Esto es un parámetro que en producción real debería ser configurable
+      - name: Security Gate
+        id: gate
+        run: |
+          CRITICAL=${{ steps.report.outputs.critical_findings }}
+          echo "Hallazgos críticos: $CRITICAL"
+
+          if [ "$CRITICAL" -eq "0" ]; then
+            echo "security_passed=true" >> $GITHUB_OUTPUT
+            echo "✅ Security gate PASSED — sin hallazgos críticos"
+          else
+            echo "security_passed=false" >> $GITHUB_OUTPUT
+            echo "❌ Security gate FAILED — $CRITICAL hallazgos críticos"
+          fi
+
+      - name: Subir reporte consolidado
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: artifacts/report/security-report.json
+          retention-days: 30
