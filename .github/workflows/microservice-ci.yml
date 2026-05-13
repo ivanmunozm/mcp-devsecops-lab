@@ -1,8 +1,8 @@
+# .github/workflows/microservice-ci.yml
 name: Microservice CI
 
 on:
   push:
-    # Solo triggerear cuando cambia el microservicio
     paths:
       - 'microservice/**'
     branches: [master]
@@ -19,21 +19,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # packages: write es el permiso para push a GHCR
       packages: write
 
-    # outputs para pasar el tag exacto al job de seguridad
     outputs:
+      short_sha: ${{ steps.sha.outputs.short }}
       image_tag: ${{ steps.meta.outputs.tags }}
-      image_digest: ${{ steps.push.outputs.digest }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # docker/metadata-action genera tags automáticamente
-      # Para push a master: ghcr.io/ivanmunozm/ms-devsecops:master-sha-abc1234
-      # Para tags de release: ghcr.io/ivanmunozm/ms-devsecops:v1.0.0
+      # Calcular SHA corto — 7 caracteres, mismo formato que metadata-action
+      - name: Calcular SHA corto
+        id: sha
+        run: echo "short=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
       - name: Generar metadata de imagen
         id: meta
         uses: docker/metadata-action@v5
@@ -48,12 +48,9 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          # GITHUB_TOKEN tiene permisos de packages:write automáticamente
-          # No necesitas crear secrets adicionales
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # buildx habilita BuildKit — builds más rápidos y multi-platform
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -65,11 +62,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Build args para los ARGs del Dockerfile
           build-args: |
             APP_VERSION=${{ github.sha }}
             GIT_SHA=${{ github.sha }}
-          # Cache entre builds — acelera CI significativamente
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -86,7 +81,8 @@ jobs:
     with:
       target_repo: ${{ github.repository }}
       target_branch: ${{ github.ref_name }}
-      image_tag: ghcr.io/${{ github.repository_owner }}/ms-devsecops:sha-${{ github.sha }}
+      # Usamos el SHA corto del output del job anterior — coincide exactamente con GHCR
+      image_tag: ghcr.io/${{ github.repository_owner }}/ms-devsecops:sha-${{ needs.build-and-push.outputs.short_sha }}
       scan_level: quick
     secrets: inherit
 
@@ -95,7 +91,6 @@ jobs:
     name: "GitOps — Update Deployment"
     needs: [build-and-push, security-scan]
     runs-on: ubuntu-latest
-    # Solo actualizar si el security gate pasó
     if: needs.security-scan.outputs.security_passed == 'true'
     permissions:
       contents: write
@@ -106,17 +101,14 @@ jobs:
 
       - name: Actualizar image tag en values.yaml
         run: |
-          # Extraer el SHA corto para el tag
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          SHORT_SHA="${{ needs.build-and-push.outputs.short_sha }}"
           IMAGE_TAG="sha-${SHORT_SHA}"
 
           echo "Actualizando image.tag a: $IMAGE_TAG"
 
-          # Actualizar el values.yaml con el nuevo tag
           sed -i "s|tag: .*|tag: \"${IMAGE_TAG}\"|" \
             microservice/helm/ms-devsecops/values.yaml
 
-          # Verificar el cambio
           grep "tag:" microservice/helm/ms-devsecops/values.yaml
 
       - name: Commit y push del nuevo tag
@@ -124,7 +116,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          SHORT_SHA="${{ needs.build-and-push.outputs.short_sha }}"
 
           git add microservice/helm/ms-devsecops/values.yaml
           git diff --staged --quiet || git commit -m \
