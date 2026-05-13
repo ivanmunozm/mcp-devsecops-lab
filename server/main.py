@@ -8,6 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from server.config import config
 from server.tools.health import register_health_tools
 from server.tools.github_actions import register_github_actions_tools
+from server.tools.microservice import register_microservice_tools
 
 # Validar configuración en el arranque
 # Si falta GITHUB_TOKEN, el servidor no arranca — mejor que fallar
@@ -19,6 +20,7 @@ mcp = FastMCP("devsecops-lab")
 # Registrar módulos de tools
 register_health_tools(mcp)
 register_github_actions_tools(mcp)
+register_microservice_tools(mcp)   
 
 if __name__ == "__main__":
     mcp.run()
