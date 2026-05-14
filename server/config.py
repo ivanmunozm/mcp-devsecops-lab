@@ -14,35 +14,29 @@ from dotenv import load_dotenv
 # Carga el .env — si no existe, usa variables del entorno del sistema
 # Esto permite que en GitHub Actions las variables vengan de Secrets
 # sin cambiar ningún código
-load_dotenv()
+load_dotenv(override=False)
 
 class Config:
-    # Token de GitHub — requerido, falla si no está
+    # GitHub
     GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
     GITHUB_OWNER: str = os.getenv("GITHUB_OWNER", "")
-    GITHUB_REPO: str  = os.getenv("GITHUB_REPO", "")
-
-    # URL base de la API de GitHub — no cambia
+    GITHUB_REPO:  str = os.getenv("GITHUB_REPO", "")
     GITHUB_API_BASE: str = "https://api.github.com"
-
-    # Nombre del workflow file — debe coincidir con el archivo que creamos
     WORKFLOW_FILE: str = "devsecops-pipeline.yml"
 
+    # ArgoCD — Fase 3
+    ARGOCD_SERVER:   str  = os.getenv("ARGOCD_SERVER", "localhost:8080")
+    ARGOCD_TOKEN:    str  = os.getenv("ARGOCD_TOKEN", "")
+    ARGOCD_INSECURE: bool = os.getenv("ARGOCD_INSECURE", "true").lower() == "true"
+
     def validate(self) -> None:
-        """Valida que las variables críticas están presentes."""
         missing = []
-        if not self.GITHUB_TOKEN:
-            missing.append("GITHUB_TOKEN")
-        if not self.GITHUB_OWNER:
-            missing.append("GITHUB_OWNER")
-        if not self.GITHUB_REPO:
-            missing.append("GITHUB_REPO")
-
+        for key in ["GITHUB_TOKEN", "GITHUB_OWNER", "GITHUB_REPO"]:
+            if not getattr(self, key):
+                missing.append(key)
         if missing:
-            raise ValueError(
-                f"Variables de entorno faltantes: {', '.join(missing)}\n"
-                f"Verifica tu archivo .env"
-            )
+            raise ValueError(f"Variables de entorno faltantes: {', '.join(missing)}")
+        if not self.ARGOCD_TOKEN:
+            print("⚠️  ARGOCD_TOKEN no configurado — get_argocd_status no funcionará")
 
-# Instancia global — se importa desde cualquier módulo
 config = Config()
