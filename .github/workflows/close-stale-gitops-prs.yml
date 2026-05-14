@@ -1,0 +1,42 @@
+name: Close stale GitOps PRs
+
+on:
+  schedule:
+    # Corre cada 6 horas
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  close-stale:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Cerrar PRs de GitOps sin aprobar después de 48 horas
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Obtener PRs abiertos con label "gitops,automated"
+          # que tengan más de 48 horas sin actividad
+          gh pr list \
+            --repo ${{ github.repository }} \
+            --label "gitops" \
+            --state open \
+            --json number,title,createdAt,headRefName \
+            --jq '.[] | select(
+              (now - (.createdAt | fromdateiso8601)) > 172800
+            ) | .number' | while read PR_NUMBER; do
+
+            echo "Cerrando PR #$PR_NUMBER por expiración de 48 horas"
+
+            gh pr close $PR_NUMBER \
+              --comment "PR cerrado automáticamente — no fue aprobado en 48 horas.
+              
+              Para deployar esta versión se debe triggerear un nuevo pipeline.
+              Un PR vencido puede contener una imagen con CVEs nuevos no detectados en el scan original.
+              
+              > Política: todo deploy debe ser aprobado dentro de las 48 horas del scan de seguridad." \
+              --delete-branch
+
+          done
