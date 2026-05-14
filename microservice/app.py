@@ -5,6 +5,7 @@ Simula un servicio de gestión de transacciones.
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
+from prometheus_fastapi_instrumentator import Instrumentator
 import uvicorn
 import os
 
@@ -13,6 +14,14 @@ app = FastAPI(
     description="Microservicio de laboratorio para pipeline DevSecOps",
     version="0.1.0",
 )
+
+# Instrumentar la app con Prometheus
+# Esto expone automáticamente el endpoint /metrics con:
+#   - http_requests_total (counter por método, path, status)
+#   - http_request_duration_seconds (histogram de latencia)
+#   - http_request_size_bytes
+#   - http_response_size_bytes
+Instrumentator().instrument(app).expose(app)
 
 # Modelo de datos — Pydantic valida automáticamente los tipos
 class Transaction(BaseModel):
