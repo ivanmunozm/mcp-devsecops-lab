@@ -28,6 +28,11 @@ class Config:
     ARGOCD_SERVER:   str  = os.getenv("ARGOCD_SERVER", "localhost:8080")
     ARGOCD_TOKEN:    str  = os.getenv("ARGOCD_TOKEN", "")
     ARGOCD_INSECURE: bool = os.getenv("ARGOCD_INSECURE", "true").lower() == "true"
+    
+    
+    # Monitorizacion
+    PROMETHEUS_SERVER: str = os.getenv("PROMETHEUS_SERVER", "localhost:9090")
+    GRAFANA_SERVER:    str = os.getenv("GRAFANA_SERVER", "localhost:3000")
 
     def validate(self) -> None:
         missing = []

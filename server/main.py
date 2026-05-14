@@ -10,6 +10,7 @@ from server.tools.health import register_health_tools
 from server.tools.github_actions import register_github_actions_tools
 from server.tools.microservice import register_microservice_tools
 from server.tools.argocd import register_argocd_tools
+from server.tools.observability import register_observability_tools
 
 # Validar configuración en el arranque
 # Si falta GITHUB_TOKEN, el servidor no arranca — mejor que fallar
@@ -22,7 +23,8 @@ mcp = FastMCP("devsecops-lab")
 register_health_tools(mcp)
 register_github_actions_tools(mcp)
 register_microservice_tools(mcp)
-register_argocd_tools(mcp)  
+register_argocd_tools(mcp)
+register_observability_tools(mcp)
 
 if __name__ == "__main__":
     mcp.run()
