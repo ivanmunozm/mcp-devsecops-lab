@@ -111,7 +111,8 @@ jobs:
       - name: Crear branch y commit
         run: |
           SHORT_SHA="${{ needs.build-and-push.outputs.short_sha }}"
-          BRANCH="gitops/deploy-sha-${SHORT_SHA}"
+          RUN_ID="${{ github.run_id }}"
+          BRANCH="gitops/deploy-sha-${SHORT_SHA}-run-${RUN_ID}"
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -126,14 +127,15 @@ jobs:
             Triggered by: ${{ github.actor }}
             Run: ${{ github.run_id }}"
 
-          git push origin $BRANCH
+          git push origin $BRANCH --force-with-lease
 
       - name: Abrir Pull Request
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           SHORT_SHA="${{ needs.build-and-push.outputs.short_sha }}"
-          BRANCH="gitops/deploy-sha-${SHORT_SHA}"
+          RUN_ID="${{ github.run_id }}"
+          BRANCH="gitops/deploy-sha-${SHORT_SHA}-run-${RUN_ID}"
 
           gh pr create \
             --title "deploy: ms-devsecops sha-${SHORT_SHA}" \
