@@ -6,7 +6,7 @@ image:
   # repository se sobreescribe en CI con la imagen real de GHCR
   repository: ghcr.io/ivanmunozm/ms-devsecops
   # tag se sobreescribe en CI con el SHA del commit
-  tag: "sha-21af7fe"
+  tag: "sha-adff806"
   # IfNotPresent: no re-descarga si ya existe localmente
   # Always: siempre descarga — útil en dev con latest
   pullPolicy: IfNotPresent
