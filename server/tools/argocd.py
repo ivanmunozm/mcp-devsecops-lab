@@ -224,3 +224,130 @@ def register_argocd_tools(mcp: FastMCP) -> None:
             "error": f"Error forzando sync: HTTP {response.status_code}",
             "details": response.text[:300]
         }
+    @mcp.tool()
+    async def rollback_deployment(
+        app_name: str = "ms-devsecops",
+        revision: int = 0,
+    ) -> dict:
+        """
+        Hace rollback del microservicio a una revisión anterior en ArgoCD.
+        Usar cuando get_service_metrics detecta regresión de performance
+        o cuando get_argocd_status muestra estado Degraded.
+        revision=0 vuelve a la revisión inmediatamente anterior.
+        revision=N vuelve a una revisión específica del historial.
+
+        Args:
+            app_name: nombre de la aplicación en ArgoCD (default: ms-devsecops)
+            revision: ID de revisión a restaurar. 0 = revisión anterior automáticamente
+        """
+        if not config.ARGOCD_TOKEN:
+            return {"error": "ARGOCD_TOKEN no configurado"}
+
+        # Primero obtener el estado actual para saber la revisión actual
+        app_url = f"{_argocd_base_url()}/applications/{app_name}"
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=30,
+                verify=not config.ARGOCD_INSECURE
+            ) as client:
+                app_response = await client.get(
+                    app_url,
+                    headers=_argocd_headers()
+                )
+        except httpx.ConnectError:
+            return {
+                "error": "No se puede conectar a ArgoCD",
+                "suggestion": "Verificar port-forward: kubectl port-forward svc/argocd-server -n argocd 8080:443"
+            }
+
+        if app_response.status_code != 200:
+            return {"error": f"Aplicación '{app_name}' no encontrada"}
+
+        app_data = app_response.json()
+
+        # Obtener historial de deployments
+        history = app_data.get("status", {}).get("history", [])
+
+        if not history:
+            return {
+                "error": "No hay historial de deployments disponible",
+                "suggestion": "La aplicación debe haber tenido al menos 2 deployments para hacer rollback"
+            }
+
+        # Ordenar por ID descendente — el más reciente primero
+        history_sorted = sorted(history, key=lambda x: x.get("id", 0), reverse=True)
+
+        current = history_sorted[0]
+
+        # Si revision=0, usar la inmediatamente anterior
+        if revision == 0:
+            if len(history_sorted) < 2:
+                return {
+                    "error": "No hay revisión anterior disponible",
+                    "current_revision": current.get("id"),
+                    "suggestion": "Solo existe un deployment en el historial"
+                }
+            target = history_sorted[1]
+        else:
+            # Buscar la revisión específica
+            target = next(
+                (h for h in history_sorted if h.get("id") == revision),
+                None
+            )
+            if not target:
+                available = [h.get("id") for h in history_sorted]
+                return {
+                    "error": f"Revisión {revision} no encontrada",
+                    "available_revisions": available,
+                }
+
+        target_revision_id = target.get("id")
+        target_sha = target.get("revision", "unknown")[:7]
+        target_deployed_at = target.get("deployedAt", "unknown")
+
+        # Paso 2 — ejecutar el rollback
+        rollback_url = f"{_argocd_base_url()}/applications/{app_name}/rollback"
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=30,
+                verify=not config.ARGOCD_INSECURE
+            ) as client:
+                rollback_response = await client.post(
+                    rollback_url,
+                    headers=_argocd_headers(),
+                    json={"id": target_revision_id, "prune": True}
+                )
+        except httpx.ConnectError:
+            return {"error": "No se puede conectar a ArgoCD"}
+
+        if rollback_response.status_code == 200:
+            return {
+                "status": "rollback_initiated",
+                "application": app_name,
+                "rolled_back_from": {
+                    "revision": current.get("id"),
+                    "sha": current.get("revision", "unknown")[:7],
+                },
+                "rolled_back_to": {
+                    "revision": target_revision_id,
+                    "sha": target_sha,
+                    "originally_deployed_at": target_deployed_at,
+                },
+                "message": (
+                    f"Rollback iniciado — volviendo a sha-{target_sha}. "
+                    f"Usar get_argocd_status en 30 segundos para verificar "
+                    f"que el estado volvió a Healthy."
+                ),
+                "warning": (
+                    "IMPORTANTE: El values.yaml en Git todavía apunta a la versión nueva. "
+                    "Para mantener Git como fuente de verdad, crear un PR que revierta "
+                    "el values.yaml al tag anterior: sha-" + target_sha
+                )
+            }
+
+        return {
+            "error": f"Error ejecutando rollback: HTTP {rollback_response.status_code}",
+            "details": rollback_response.text[:300]
+        }
